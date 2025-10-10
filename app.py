@@ -457,7 +457,7 @@ class PillBoxApp(tk.Tk):
                     # Only show one popup at a time to keep v1 simple
                     break
         except Exception as e:
-            # Minimal error guard in v1; add proper logging in v2.
+            
             print("Scheduler error:", e)
 
         self._update_grid_colors()
