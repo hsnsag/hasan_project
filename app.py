@@ -1,12 +1,16 @@
-
+# run_app.py — PillBox v2 (Progress A, dropdowns + week view, fixed geometry)
+# ----------------------------------------------------------------------------
+# - Week view (Mon–Sun)
+# - Dropdowns for hours/minutes, checkboxes for days
+# - Persistent snoozes in snoozes.csv (apply to TODAY only)
+# - “Due soon” highlight only for today
+# - Cleaner look, no mix of grid/pack in the Add/Edit tab
 
 import csv
 import os
 from datetime import datetime, date, time, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox
-from tkinter.simpledialog import askstring
-
 
 try:
     import matplotlib
@@ -18,13 +22,25 @@ except Exception:
     MATPLOTLIB_OK = False
 
 
+try:
+    import pandas as pd
+    PANDAS_OK = True
+except Exception:
+    PANDAS_OK = False
+
+# ---------------- Files / headers ----------------
 SCHEDULE_CSV = "med_schedule.csv"
 LOG_CSV = "dose_log.csv"
+SNOOZE_CSV = "snoozes.csv"
+
 SCHEDULE_HEADERS = ["med_id", "med_name", "dose", "times_csv", "days_mask", "active"]
 LOG_HEADERS = ["log_id", "med_id", "scheduled_dt", "action", "actual_dt"]
+SNOOZE_HEADERS = ["med_id", "scheduled_dt", "new_dt"]
 
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+DATE_FMT = "%Y-%m-%d %H:%M"
 
+# Grid buckets by hour
 BUCKETS = {
     "AM": range(5, 12),
     "Noon": range(12, 15),
@@ -32,26 +48,19 @@ BUCKETS = {
     "Bed": list(range(20, 24)) + list(range(0, 5)),
 }
 
-SNOOZE_OVERRIDES = {}
-
-
-def ensure_csv(path: str, headers: list[str]) -> None:
-    """Create CSV with headers if missing."""
+# ---------------- CSV helpers ----------------
+def ensure_csv(path, headers):
     if not os.path.exists(path):
         with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(headers)
+            csv.writer(f).writerow(headers)
 
-def read_rows(path: str) -> list[dict]:
-    """Read CSV into list of dicts (empty if missing)."""
+def read_rows(path):
     if not os.path.exists(path):
         return []
     with open(path, "r", newline="", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        return list(r)
+        return list(csv.DictReader(f))
 
-def append_row(path: str, headers: list[str], row: dict) -> None:
-    """Append a single row (auto-create file)."""
+def append_row(path, headers, row):
     ensure_csv(path, headers)
     file_exists = os.path.exists(path) and os.path.getsize(path) > 0
     with open(path, "a", newline="", encoding="utf-8") as f:
@@ -60,123 +69,107 @@ def append_row(path: str, headers: list[str], row: dict) -> None:
             w.writeheader()
         w.writerow(row)
 
-def write_all(path: str, headers: list[str], rows: list[dict]) -> None:
-    """Rewrite all rows (used if you add editing later)."""
+def write_all(path, headers, rows):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=headers)
         w.writeheader()
-        for row in rows:
-            w.writerow(row)
+        for r in rows:
+            w.writerow(r)
 
+# ---------------- SnoozeManager ----------------
+class SnoozeManager:
+    def __init__(self, path=SNOOZE_CSV):
+        self.path = path
+        ensure_csv(self.path, SNOOZE_HEADERS)
 
-def next_med_id(existing_rows: list[dict]) -> int:
-    """Get next integer med_id."""
+    def add(self, med_id, scheduled_dt, new_dt):
+        row = {
+            "med_id": str(med_id),
+            "scheduled_dt": scheduled_dt.strftime(DATE_FMT),
+            "new_dt": new_dt.strftime(DATE_FMT),
+        }
+        if PANDAS_OK:
+            try:
+                df = pd.read_csv(self.path)
+                df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                df.to_csv(self.path, index=False)
+                return
+            except Exception:
+                pass
+        append_row(self.path, SNOOZE_HEADERS, row)
+
+    def get_today(self):
+        """Return {(med_id, scheduled_iso): new_dt} for today only."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        out = {}
+        if PANDAS_OK:
+            try:
+                df = pd.read_csv(self.path)
+                df = df[df["new_dt"].astype(str).str.startswith(today)]
+                for _, r in df.iterrows():
+                    try:
+                        out[(str(r["med_id"]), str(r["scheduled_dt"]))] = datetime.strptime(str(r["new_dt"]), DATE_FMT)
+                    except Exception:
+                        pass
+                return out
+            except Exception:
+                pass
+        for r in read_rows(self.path):
+            nd = str(r.get("new_dt", ""))
+            if nd.startswith(today):
+                try:
+                    out[(str(r.get("med_id","")), str(r.get("scheduled_dt","")))] = datetime.strptime(nd, DATE_FMT)
+                except Exception:
+                    pass
+        return out
+
+    def cleanup_old(self, keep_days=1):
+        cutoff = datetime.now() - timedelta(days=keep_days)
+        kept = []
+        if PANDAS_OK:
+            try:
+                df = pd.read_csv(self.path)
+                if df.empty:
+                    return
+                df["__nd"] = pd.to_datetime(df["new_dt"], errors="coerce", format=DATE_FMT)
+                df = df[df["__nd"] > cutoff]
+                df.drop(columns=["__nd"], inplace=True, errors="ignore")
+                df.to_csv(self.path, index=False)
+                return
+            except Exception:
+                pass
+        for r in read_rows(self.path):
+            try:
+                if datetime.strptime(r.get("new_dt",""), DATE_FMT) > cutoff:
+                    kept.append(r)
+            except Exception:
+                pass
+        write_all(self.path, SNOOZE_HEADERS, kept)
+
+# ---------------- helpers ----------------
+def coerce_days_mask_from_bools(day_bools):
+    # Monday=0 .. Sunday=6
+    return "".join("1" if b else "0" for b in day_bools)
+
+def is_day_active(mask, d):
+    return len(mask) == 7 and mask[d.weekday()] == "1"
+
+def bucket_for_hour(h):
+    for label, hours in BUCKETS.items():
+        if h in hours:
+            return label
+    return "AM"
+
+def next_med_id(rows):
     max_id = 0
-    for r in existing_rows:
+    for r in rows:
         try:
             max_id = max(max_id, int(r["med_id"]))
         except Exception:
             pass
     return max_id + 1
 
-def validate_days_mask(mask: str) -> bool:
-    """
-    Accept either 7 chars of 1/0 (e.g., '1111111') or exactly 7 letters like 'MTWTFSS'.
-    For beginners, we’ll also accept 'Mon,Tue,...' and convert.
-    """
-    m = mask.strip()
-    if len(m) == 7 and all(ch in "10" for ch in m):
-        return True
-    if len(m) == 7 and m.upper() in ["MTWTFSS"]:
-        return True
-    parts = [p.strip().capitalize()[:3] for p in m.split(",")]
-    if all(p in DAYS for p in parts):
-        # Build bitmask Mon..Sun
-        bitmask = "".join("1" if d in parts else "0" for d in DAYS)
-        return True if len(bitmask) == 7 else False
-    return False
-
-def coerce_days_mask(mask: str) -> str:
-    """Return standardized 1111111 across Mon..Sun."""
-    m = mask.strip()
-    if len(m) == 7 and all(ch in "10" for ch in m):
-        return m
-    if m.upper() in ["MTWTFSS"] and len(m) == 7:
-        # Map M T W T F S S → Mon..Sun
-        # M T W T F S S  → indices 0..6
-        # We need 1/0; here treat letters != '-' as 1
-        return "".join("1" for _ in range(7))
-    # Convert comma names
-    parts = [p.strip().capitalize()[:3] for p in m.split(",")]
-    bitmask = "".join("1" if d in parts else "0" for d in DAYS)
-    if len(bitmask) == 7:
-        return bitmask
-    # default to all days if invalid (beginner-friendly fallback)
-    return "1111111"
-
-def parse_times_csv(times_csv: str) -> list[time]:
-    """Parse '08:00,20:00' -> [time(8,0), time(20,0)]. Skip bad entries."""
-    out: list[time] = []
-    for part in times_csv.split(","):
-        p = part.strip()
-        if not p:
-            continue
-        try:
-            hh, mm = p.split(":")
-            out.append(time(int(hh), int(mm)))
-        except Exception:
-            pass
-    return out
-
-def is_day_active(mask_1111111: str, dt: date) -> bool:
-    """Check if today's weekday is active in mask."""
-    idx = dt.weekday()  # Monday=0
-    if len(mask_1111111) != 7:
-        return False
-    return mask_1111111[idx] == "1"
-
-def due_within_window(now: datetime, scheduled: datetime, window_seconds: int = 60) -> bool:
-    """True if now within ±window_seconds of scheduled."""
-    return abs((now - scheduled).total_seconds()) <= window_seconds
-
-def bucket_for_hour(hh: int) -> str:
-    for label, hours in BUCKETS.items():
-        if hh in hours:
-            return label
-    return "AM"
-
-
-def build_today_schedule() -> list[dict]:
-
-    rows = read_rows(SCHEDULE_CSV)
-    today = date.today()
-    out = []
-    for r in rows:
-        if r.get("active", "1").strip() not in ["1", "true", "True", "yes", "YES"]:
-            continue
-        mask = coerce_days_mask(r.get("days_mask", "1111111"))
-        if not is_day_active(mask, today):
-            continue
-        times_list = parse_times_csv(r.get("times_csv", ""))
-        for t in times_list:
-            sched = datetime.combine(today, t)
-            scheduled_iso = sched.strftime("%Y-%m-%d %H:%M")
-            # Snooze override?
-            override = SNOOZE_OVERRIDES.get((r["med_id"], scheduled_iso))
-            if override:
-                sched = override
-                scheduled_iso = sched.strftime("%Y-%m-%d %H:%M")
-            out.append({
-                "med_id": r["med_id"],
-                "med_name": r["med_name"],
-                "dose": r["dose"],
-                "scheduled_dt": sched,
-                "scheduled_iso": scheduled_iso,
-                "active": "1"
-            })
-    return sorted(out, key=lambda d: d["scheduled_dt"])
-
-def log_action(med_id: str, scheduled_dt: datetime, action: str, actual_dt: datetime | None = None) -> None:
+def log_action(med_id, sched_dt, action, actual_dt=None):
     rows = read_rows(LOG_CSV)
     next_id = 1
     for r in rows:
@@ -186,209 +179,261 @@ def log_action(med_id: str, scheduled_dt: datetime, action: str, actual_dt: date
             pass
     row = {
         "log_id": str(next_id),
-        "med_id": med_id,
-        "scheduled_dt": scheduled_dt.strftime("%Y-%m-%d %H:%M"),
+        "med_id": str(med_id),
+        "scheduled_dt": sched_dt.strftime(DATE_FMT),
         "action": action,
-        "actual_dt": (actual_dt or datetime.now()).strftime("%Y-%m-%d %H:%M"),
+        "actual_dt": (actual_dt or datetime.now()).strftime(DATE_FMT),
     }
     append_row(LOG_CSV, LOG_HEADERS, row)
 
-def is_already_logged(med_id: str, scheduled_dt: datetime) -> bool:
-    """Check if a taken/skipped/snoozed exists (we treat any action as 'handled' for v1)."""
-    rows = read_rows(LOG_CSV)
-    key = (med_id, scheduled_dt.strftime("%Y-%m-%d %H:%M"))
-    for r in rows:
+def is_already_logged(med_id, sched_dt):
+    key = (str(med_id), sched_dt.strftime(DATE_FMT))
+    for r in read_rows(LOG_CSV):
         if r.get("med_id") == key[0] and r.get("scheduled_dt") == key[1]:
             return True
     return False
 
-# -------------------------
-# Tkinter UI
-# -------------------------
+# ---------------- Tkinter app ----------------
 class PillBoxApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PillBox — Medicine Reminder (v1)")
-        self.geometry("920x620")
+        self.title("PillBox — Version 2 (Progress A, dropdowns + week view)")
+        self.geometry("980x720")
         self.resizable(False, False)
 
-        # Ensure CSVs exist
+        # Style
+        try:
+            style = ttk.Style(self)
+            style.theme_use("clam")
+            style.configure("Title.TLabel", font=("Segoe UI", 13, "bold"))
+            style.configure("Label.TLabel", font=("Segoe UI", 10))
+            style.configure("Bold.TLabel", font=("Segoe UI", 10, "bold"))
+            style.configure("TButton", padding=6)
+        except Exception:
+            pass
+
+        # CSVs
         ensure_csv(SCHEDULE_CSV, SCHEDULE_HEADERS)
         ensure_csv(LOG_CSV, LOG_HEADERS)
+        ensure_csv(SNOOZE_CSV, SNOOZE_HEADERS)
+
+        self.snooze_mgr = SnoozeManager()
+        self.snooze_mgr.cleanup_old(keep_days=2)
 
         # Tabs
         self.tabs = ttk.Notebook(self)
-        self.tab_grid = ttk.Frame(self.tabs)
-        self.tab_edit = ttk.Frame(self.tabs)
-        self.tab_summary = ttk.Frame(self.tabs)
+        self.tab_grid = ttk.Frame(self.tabs, padding=12)
+        self.tab_edit = ttk.Frame(self.tabs, padding=12)
+        self.tab_summary = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(self.tab_grid, text="Pillbox")
         self.tabs.add(self.tab_edit, text="Add/Edit")
         self.tabs.add(self.tab_summary, text="Summary")
         self.tabs.pack(fill="both", expand=True)
 
-        # Build tab content
         self._build_grid_tab()
         self._build_edit_tab()
         self._build_summary_tab()
 
-        # Kick off the scheduler loop
+        ttk.Label(self, text="PillBox v2 — Progress Report A", anchor="center").pack(side="bottom", fill="x", pady=6)
         self._update_grid_colors()
         self._scheduler_loop()
 
-    # ---------- Pillbox tab ----------
-    def _build_grid_tab(self):
-        ttk.Label(self.tab_grid, text="Weekly Pillbox (Mon–Sun × AM/Noon/PM/Bed)", font=("Segoe UI", 12, "bold")).pack(pady=10)
+    # ---------- week schedule (Mon..Sun) ----------
+    def _build_week_schedule(self):
+        rows = read_rows(SCHEDULE_CSV)
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        today_snoozes = self.snooze_mgr.get_today()
+        out = []
+        for d_off in range(7):
+            d = monday + timedelta(days=d_off)
+            for r in rows:
+                if str(r.get("active","1")).strip().lower() not in ["1","true","yes"]:
+                    continue
+                if not is_day_active(r.get("days_mask","1111111"), d):
+                    continue
+                for part in (r.get("times_csv","") or "").split(","):
+                    p = part.strip()
+                    if len(p) == 5 and p[2] == ":":
+                        try:
+                            hh, mm = map(int, p.split(":"))
+                            sched = datetime.combine(d, time(hh, mm))
+                            iso = sched.strftime(DATE_FMT)
+                            # apply snoozes to TODAY only
+                            if d == today and (str(r["med_id"]), iso) in today_snoozes:
+                                sched = today_snoozes[(str(r["med_id"]), iso)]
+                                iso = sched.strftime(DATE_FMT)
+                            out.append({
+                                "med_id": str(r["med_id"]),
+                                "med_name": r["med_name"],
+                                "dose": r["dose"],
+                                "scheduled_dt": sched,
+                                "scheduled_iso": iso
+                            })
+                        except Exception:
+                            pass
+        return sorted(out, key=lambda d: d["scheduled_dt"])
 
-        # Grid frame
+    # ---------- grid tab ----------
+    def _build_grid_tab(self):
+        ttk.Label(self.tab_grid, text="Weekly Pillbox (Mon–Sun × AM/Noon/PM/Bed)", style="Title.TLabel").pack(pady=(0,10))
         frame = ttk.Frame(self.tab_grid)
         frame.pack(pady=10)
 
-        # Header row: days
-        ttk.Label(frame, text="").grid(row=0, column=0, padx=6, pady=6)
+        ttk.Label(frame, text="", style="Bold.TLabel").grid(row=0, column=0, padx=6, pady=6)
         for j, day in enumerate(DAYS, start=1):
-            ttk.Label(frame, text=day, font=("Segoe UI", 10, "bold")).grid(row=0, column=j, padx=6, pady=6)
+            ttk.Label(frame, text=day, style="Bold.TLabel").grid(row=0, column=j, padx=6, pady=6)
 
-        # 4 rows for AM/Noon/PM/Bed
-        self.grid_labels = {}  # (bucket, day_idx) -> Label
+        self.grid_labels = {}
         for i, bucket in enumerate(["AM", "Noon", "PM", "Bed"], start=1):
-            ttk.Label(frame, text=bucket, font=("Segoe UI", 10, "bold")).grid(row=i, column=0, padx=6, pady=6, sticky="e")
+            ttk.Label(frame, text=bucket, style="Bold.TLabel").grid(row=i, column=0, padx=6, pady=6, sticky="e")
             for j in range(1, 8):
-                lbl = tk.Label(frame, text=" ", width=16, height=3, relief="groove", bg="#f2f2f2")
-                lbl.grid(row=i, column=j, padx=4, pady=4)
+                lbl = tk.Label(frame, text=" ", width=18, height=3, relief="groove", bg="#f2f2f2")
+                lbl.grid(row=i, column=j, padx=3, pady=3)
                 self.grid_labels[(bucket, j-1)] = lbl
 
-        # Legend
         legend = ttk.Frame(self.tab_grid)
         legend.pack(pady=8)
         for color, text in [
-            ("#90ee90", "Taken (today)"),
-            ("#ffcccb", "Skipped (today)"),
-            ("#fff59d", "Due soon"),
-            ("#f2f2f2", "No scheduled / not due"),
+            ("#90ee90", "Taken"),
+            ("#ffcccb", "Skipped"),
+            ("#d0e0ff", "Snoozed"),
+            ("#fff59d", "Due soon (today)"),
+            ("#f2f2f2", "Idle"),
         ]:
             box = tk.Label(legend, width=3, height=1, bg=color, relief="groove")
             box.pack(side="left", padx=6)
-            ttk.Label(legend, text=text).pack(side="left", padx=10)
+            ttk.Label(legend, text=text).pack(side="left", padx=8)
 
-        ttk.Button(self.tab_grid, text="Refresh", command=self._refresh_ui).pack(pady=4)
+        btns = ttk.Frame(self.tab_grid); btns.pack(pady=6)
+        ttk.Button(btns, text="Refresh", command=self._refresh_ui).pack(side="left", padx=4)
+        ttk.Button(btns, text="Clear old snoozes", command=lambda: self._clear_old_snoozes(1)).pack(side="left", padx=4)
+
+    def _clear_old_snoozes(self, keep_days):
+        self.snooze_mgr.cleanup_old(keep_days)
+        messagebox.showinfo("Snoozes", f"Old snoozes cleared (> {keep_days} day).")
 
     def _refresh_ui(self):
         self._update_grid_colors()
         self._draw_summary()
         self.update_idletasks()
+
     def _update_grid_colors(self):
-    
-    # Reset all
+        # reset
         for lbl in self.grid_labels.values():
             lbl.config(bg="#f2f2f2", text=" ")
 
-        today_sched = build_today_schedule()
+        week = self._build_week_schedule()
         logs = read_rows(LOG_CSV)
+        # {(med_id, scheduled_iso): action}
+        act_map = {(r.get("med_id",""), r.get("scheduled_dt","")): (r.get("action","") or "")
+                   for r in logs}
 
-    # Map (med_id, scheduled) -> action for TODAY only
-        today_str = date.today().strftime("%Y-%m-%d")
-        action_map = {}
-        for r in logs:
-            if r.get("scheduled_dt", "").startswith(today_str):
-                action_map[(r["med_id"], r["scheduled_dt"])] = r["action"]
-
-    # Paint
-        for item in today_sched:
-            dt_sched = item["scheduled_dt"]
-            bucket = bucket_for_hour(dt_sched.hour)
-            col = dt_sched.weekday()  # Monday=0
-            key = (item["med_id"], dt_sched.strftime("%Y-%m-%d %H:%M"))
+        today = date.today()
+        for item in week:
+            dt = item["scheduled_dt"]
+            bucket = bucket_for_hour(dt.hour)
+            col = dt.weekday()
+            key = (item["med_id"], dt.strftime(DATE_FMT))
             cell = self.grid_labels.get((bucket, col))
             if not cell:
                 continue
 
-            if key in action_map:
-                act = action_map[key]
-                if act == "taken":
-                    cell.config(bg="#90ee90", text=f"{item['med_name']}\n{item['dose']}\n{dt_sched.strftime('%H:%M')}")
-                elif act == "skipped":
-                    cell.config(bg="#ffcccb", text=f"{item['med_name']}\n{item['dose']}\n{dt_sched.strftime('%H:%M')}")
+            text = f"{item['med_name']}\n{item['dose']}\n{dt.strftime('%H:%M')}"
+            if key in act_map:
+                a = act_map[key]
+                if a == "taken":
+                    cell.config(bg="#90ee90", text=text)
+                elif a == "skipped":
+                    cell.config(bg="#ffcccb", text=text)
+                elif a == "snoozed":
+                    cell.config(bg="#d0e0ff", text=f"{item['med_name']}\n(snoozed)\n{dt.strftime('%H:%M')}")
                 else:
-                    cell.config(bg="#d0e0ff", text=f"{item['med_name']}\n(snoozed)\n{dt_sched.strftime('%H:%M')}")
-        else:
-            now = datetime.now()
-            if due_within_window(now, dt_sched, 60 * 15):
-                cell.config(bg="#fff59d", text=f"{item['med_name']}\n{item['dose']}\n{dt_sched.strftime('%H:%M')}")
+                    cell.config(text=text)
             else:
-                cell.config(text=f"{item['med_name']}\n{item['dose']}\n{dt_sched.strftime('%H:%M')}")
+                if dt.date() == today and abs((datetime.now() - dt).total_seconds()) <= 15 * 60:
+                    cell.config(bg="#fff59d", text=text)
+                else:
+                    cell.config(text=text)
 
-    
         self.update_idletasks()
+
     # ---------- Add/Edit tab ----------
     def _build_edit_tab(self):
-        frm = ttk.Frame(self.tab_edit, padding=12)
-        frm.pack(fill="x", pady=10)
+        ttk.Label(self.tab_edit, text="Add Medication", style="Title.TLabel").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,8))
 
-        ttk.Label(frm, text="Add Medication", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, pady=(0,8), sticky="w")
-
-        ttk.Label(frm, text="Name:").grid(row=1, column=0, sticky="e", padx=6, pady=4)
-        self.ent_name = ttk.Entry(frm, width=32)
+        # Name/Dose
+        ttk.Label(self.tab_edit, text="Name:", style="Label.TLabel").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+        self.ent_name = ttk.Entry(self.tab_edit, width=32)
         self.ent_name.grid(row=1, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frm, text="Dose (e.g., 500 mg):").grid(row=2, column=0, sticky="e", padx=6, pady=4)
-        self.ent_dose = ttk.Entry(frm, width=32)
+        ttk.Label(self.tab_edit, text="Dose (e.g., 500 mg):", style="Label.TLabel").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        self.ent_dose = ttk.Entry(self.tab_edit, width=32)
         self.ent_dose.grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(frm, text="Times (24h, comma-separated: 08:00,20:00):").grid(row=3, column=0, sticky="e", padx=6, pady=4)
-        self.ent_times = ttk.Entry(frm, width=32)
-        self.ent_times.grid(row=3, column=1, sticky="w", padx=6, pady=4)
+        # Time picker (dropdowns)
+        ttk.Label(self.tab_edit, text="Add Time (24h):", style="Label.TLabel").grid(row=3, column=0, sticky="e", padx=6, pady=4)
+        hours = [f"{h:02d}" for h in range(24)]
+        minutes = [f"{m:02d}" for m in range(0, 60, 5)]
+        self.cb_hour = ttk.Combobox(self.tab_edit, values=hours, width=4, state="readonly"); self.cb_hour.set("08")
+        self.cb_minute = ttk.Combobox(self.tab_edit, values=minutes, width=4, state="readonly"); self.cb_minute.set("00")
+        self.cb_hour.grid(row=3, column=1, sticky="w")
+        ttk.Label(self.tab_edit, text=":", style="Bold.TLabel").grid(row=3, column=2, sticky="w")
+        self.cb_minute.grid(row=3, column=3, sticky="w")
+        ttk.Button(self.tab_edit, text="Add time", command=self._add_time_to_list).grid(row=3, column=4, sticky="w", padx=6)
 
-        ttk.Label(frm, text="Days mask:").grid(row=4, column=0, sticky="e", padx=6, pady=4)
-        self.ent_days = ttk.Entry(frm, width=32)
-        self.ent_days.insert(0, "Mon,Tue,Wed,Thu,Fri,Sat,Sun")
-        self.ent_days.grid(row=4, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(self.tab_edit, text="Times:", style="Label.TLabel").grid(row=4, column=0, sticky="e", padx=6, pady=4)
+        self.times_listbox = tk.Listbox(self.tab_edit, height=4, width=18)
+        self.times_listbox.grid(row=4, column=1, sticky="w", padx=6, pady=4)
+        ttk.Button(self.tab_edit, text="Remove selected", command=self._remove_selected_time).grid(row=4, column=2, sticky="w", padx=6)
 
+        self.current_times = []
+
+        # Day checkboxes
+        ttk.Label(self.tab_edit, text="Days:", style="Label.TLabel").grid(row=5, column=0, sticky="e", padx=6, pady=4)
+        self.day_vars = [tk.BooleanVar(value=True) for _ in range(7)]
+        daysf = ttk.Frame(self.tab_edit); daysf.grid(row=5, column=1, columnspan=4, sticky="w")
+        for i, d in enumerate(DAYS):
+            ttk.Checkbutton(daysf, text=d, variable=self.day_vars[i]).grid(row=0, column=i, padx=(0,6), sticky="w")
+
+        # Active
         self.var_active = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frm, text="Active", variable=self.var_active).grid(row=5, column=1, sticky="w", padx=6, pady=4)
+        ttk.Checkbutton(self.tab_edit, text="Active", variable=self.var_active).grid(row=6, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Button(frm, text="Save Medication", command=self._save_medication).grid(row=6, column=1, sticky="w", padx=6, pady=(10,4))
+        # Save
+        ttk.Button(self.tab_edit, text="Save Medication", command=self._save_medication).grid(row=7, column=1, sticky="w", padx=6, pady=(10,4))
 
-        # A tiny viewer (read-only) of what’s in schedule CSV
+        # Viewer
+        ttk.Label(self.tab_edit, text="Current Medications", style="Bold.TLabel").grid(row=8, column=0, columnspan=6, sticky="w", pady=(14,4))
         self.tree = ttk.Treeview(self.tab_edit, columns=SCHEDULE_HEADERS, show="headings", height=8)
-        for col in SCHEDULE_HEADERS:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=130, anchor="w")
-        self.tree.pack(fill="x", padx=12, pady=10)
-        ttk.Button(self.tab_edit, text="Reload list", command=self._reload_schedule_view).pack(pady=(0,10))
+        for c in SCHEDULE_HEADERS:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=135, anchor="w")
+        self.tree.grid(row=9, column=0, columnspan=6, sticky="ew", padx=6, pady=6)
+        ttk.Button(self.tab_edit, text="Reload list", command=self._reload_schedule_view).grid(row=10, column=0, sticky="w", padx=6, pady=(0,10))
 
+        self.tab_edit.columnconfigure(1, weight=1)
         self._reload_schedule_view()
 
-    def _save_medication(self):
-        name = self.ent_name.get().strip()
-        dose = self.ent_dose.get().strip()
-        times_csv = self.ent_times.get().strip()
-        days_mask = self.ent_days.get().strip()
-        active = "1" if self.var_active.get() else "0"
+    def _add_time_to_list(self):
+        hh, mm = self.cb_hour.get(), self.cb_minute.get()
+        if hh and mm:
+            val = f"{hh}:{mm}"
+            if val not in self.current_times:
+                self.current_times.append(val)
+                self.current_times.sort()
+                self.times_listbox.delete(0, tk.END)
+                for t in self.current_times:
+                    self.times_listbox.insert(tk.END, t)
+        self.update_idletasks()
 
-        if not name or not dose or not times_csv or not validate_days_mask(days_mask):
-            messagebox.showerror("Missing/Invalid", "Please enter Name, Dose, valid Times, and Days.")
-            return
-
-        rows = read_rows(SCHEDULE_CSV)
-        new_id = next_med_id(rows)
-
-        row = {
-            "med_id": str(new_id),
-            "med_name": name,
-            "dose": dose,
-            "times_csv": times_csv,
-            "days_mask": coerce_days_mask(days_mask),
-            "active": active,
-        }
-        append_row(SCHEDULE_CSV, SCHEDULE_HEADERS, row)
-        messagebox.showinfo("Saved", f"Medication '{name}' added (id={new_id}).")
-        self._reload_schedule_view()
-        self._update_grid_colors()
-
-        # Clear fields
-        self.ent_name.delete(0, tk.END)
-        self.ent_dose.delete(0, tk.END)
-        self.ent_times.delete(0, tk.END)
+    def _remove_selected_time(self):
+        sel = self.times_listbox.curselection()
+        if sel:
+            val = self.times_listbox.get(sel[0])
+            if val in self.current_times:
+                self.current_times.remove(val)
+            self.times_listbox.delete(sel[0])
         self.update_idletasks()
 
     def _reload_schedule_view(self):
@@ -397,22 +442,58 @@ class PillBoxApp(tk.Tk):
         for r in read_rows(SCHEDULE_CSV):
             self.tree.insert("", tk.END, values=[r.get(h, "") for h in SCHEDULE_HEADERS])
 
+    def _save_medication(self):
+        name = self.ent_name.get().strip()
+        dose = self.ent_dose.get().strip()
+        times = list(self.current_times)
+        days_mask = coerce_days_mask_from_bools([v.get() for v in self.day_vars])
+        active = "1" if self.var_active.get() else "0"
+
+        if not name or not dose:
+            messagebox.showerror("Missing", "Please enter a Name and a Dose.")
+            return
+        if not times:
+            messagebox.showerror("No times", "Please add at least one time using the dropdowns.")
+            return
+
+        rows = read_rows(SCHEDULE_CSV)
+        new_id = next_med_id(rows)
+        row = {
+            "med_id": str(new_id),
+            "med_name": name,
+            "dose": dose,
+            "times_csv": ",".join(times),
+            "days_mask": days_mask,
+            "active": active,
+        }
+        append_row(SCHEDULE_CSV, SCHEDULE_HEADERS, row)
+        messagebox.showinfo("Saved", f"Medication '{name}' added (id={new_id}).")
+
+        self._reload_schedule_view()
+        self._update_grid_colors()
+        self.update_idletasks()
+
+        # clear inputs
+        self.ent_name.delete(0, tk.END)
+        self.ent_dose.delete(0, tk.END)
+        self.current_times.clear()
+        self.times_listbox.delete(0, tk.END)
+
     # ---------- Summary tab ----------
     def _build_summary_tab(self):
-        self.summary_frame = ttk.Frame(self.tab_summary, padding=12)
-        self.summary_frame.pack(fill="both", expand=True)
-        ttk.Label(self.summary_frame, text="Weekly Summary (last 7 days)", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0,8))
-        self.summary_container = ttk.Frame(self.summary_frame)
+        ttk.Label(self.tab_summary, text="Weekly Summary (last 7 days)", style="Title.TLabel").pack(anchor="w", pady=(0,8))
+        self.summary_container = ttk.Frame(self.tab_summary)
         self.summary_container.pack(fill="both", expand=True)
         self._draw_summary()
 
+        util = ttk.Frame(self.tab_summary); util.pack(pady=6)
+        ttk.Button(util, text="Refresh summary", command=self._draw_summary).pack(side="left", padx=4)
+
     def _draw_summary(self):
-        # Clear
         for w in self.summary_container.winfo_children():
             w.destroy()
-
         if not MATPLOTLIB_OK:
-            ttk.Label(self.summary_container, text="Matplotlib not available. Chart disabled for v1.").pack(pady=16)
+            ttk.Label(self.summary_container, text="Matplotlib not available. Chart disabled.").pack(pady=16)
             return
 
         logs = read_rows(LOG_CSV)
@@ -420,15 +501,15 @@ class PillBoxApp(tk.Tk):
         counts = {"taken": 0, "snoozed": 0, "skipped": 0}
         for r in logs:
             try:
-                when = datetime.strptime(r.get("actual_dt", ""), "%Y-%m-%d %H:%M")
+                when = datetime.strptime(r.get("actual_dt",""), DATE_FMT)
                 if when >= cutoff:
-                    a = r.get("action", "")
+                    a = (r.get("action") or "").strip()
                     if a in counts:
                         counts[a] += 1
             except Exception:
                 pass
 
-        fig = Figure(figsize=(5.2, 3.4), dpi=120)
+        fig = Figure(figsize=(5.6, 3.4), dpi=120)
         ax = fig.add_subplot(111)
         ax.bar(list(counts.keys()), list(counts.values()))
         ax.set_title("Actions in last 7 days")
@@ -439,76 +520,72 @@ class PillBoxApp(tk.Tk):
         canvas.get_tk_widget().pack()
         self.update_idletasks()
 
-
-    # ---------- Scheduler loop ----------
+    # ---------- scheduler (today only for popups) ----------
     def _scheduler_loop(self):
-        """
-        Every 10 seconds:
-        - Build today's schedule
-        - If something is due (±60 sec) and not logged, show popup
-        """
         try:
             now = datetime.now()
-            today_items = build_today_schedule()
-            for item in today_items:
+            today = date.today()
+            for item in self._build_week_schedule():
+                if item["scheduled_dt"].date() != today:
+                    continue
                 sched = item["scheduled_dt"]
-                if due_within_window(now, sched, window_seconds=60) and not is_already_logged(item["med_id"], sched):
+                if abs((now - sched).total_seconds()) <= 60 and not is_already_logged(item["med_id"], sched):
                     self._show_due_popup(item)
-                    # Only show one popup at a time to keep v1 simple
                     break
         except Exception as e:
-            
             print("Scheduler error:", e)
 
         self._update_grid_colors()
-        self.after(10_000, self._scheduler_loop)  # 10 seconds
+        self.after(10_000, self._scheduler_loop)
 
-    def _show_due_popup(self, item: dict):
-        """Blocking modal dialog with Take / Snooze / Skip."""
-        med_label = f"{item['med_name']} — {item['dose']} (due {item['scheduled_dt'].strftime('%H:%M')})"
+    def _show_due_popup(self, item):
         top = tk.Toplevel(self)
         top.title("Dose Due")
-        top.grab_set()  # modal
-        top.update()
-        ttk.Label(top, text="Medication due now:", font=("Segoe UI", 10, "bold")).pack(padx=16, pady=(16,8))
-        ttk.Label(top, text=med_label).pack(padx=16, pady=(0,12))
+        top.grab_set()
 
-        btn_frame = ttk.Frame(top)
-        btn_frame.pack(pady=10)
+        ttk.Label(top, text="Medication due now:", style="Bold.TLabel").pack(padx=16, pady=(16,8))
+        ttk.Label(top, text=f"{item['med_name']} — {item['dose']} (due {item['scheduled_dt'].strftime('%H:%M')})").pack(padx=16, pady=(0,12))
+
+        # Snooze minutes dropdown
+        row = ttk.Frame(top); row.pack(pady=(0,10))
+        ttk.Label(row, text="Snooze for (minutes):").pack(side="left", padx=(0,6))
+        snooze_choices = ["5","10","15","30","60"]
+        snooze_var = tk.StringVar(value="10")
+        ttk.Combobox(row, values=snooze_choices, width=5, textvariable=snooze_var, state="readonly").pack(side="left")
+
+        btns = ttk.Frame(top); btns.pack(pady=10)
 
         def do_take():
             log_action(item["med_id"], item["scheduled_dt"], "taken", datetime.now())
+            self._update_grid_colors(); self.update_idletasks()
             top.destroy()
-            self._update_grid_colors()
-            self.update_idletasks()
             messagebox.showinfo("Logged", "Marked as TAKEN.")
 
         def do_snooze():
-            # Push this specific occurrence by +10 minutes (session only)
-            new_dt = item["scheduled_dt"] + timedelta(minutes=10)
-            SNOOZE_OVERRIDES[(item["med_id"], item["scheduled_iso"])] = new_dt
+            try:
+                mins = int(snooze_var.get())
+            except Exception:
+                mins = 10
+            new_dt = item["scheduled_dt"] + timedelta(minutes=mins)
+            self.snooze_mgr.add(item["med_id"], item["scheduled_dt"], new_dt)
             log_action(item["med_id"], item["scheduled_dt"], "snoozed", datetime.now())
+            self._update_grid_colors(); self.update_idletasks()
             top.destroy()
-            self._update_grid_colors()
-            self.update_idletasks()
-            messagebox.showinfo("Snoozed", "Snoozed for 10 minutes.")
+            messagebox.showinfo("Snoozed", f"Snoozed for {mins} minutes.")
 
         def do_skip():
             log_action(item["med_id"], item["scheduled_dt"], "skipped", datetime.now())
+            self._update_grid_colors(); self.update_idletasks()
             top.destroy()
-            self._update_grid_colors()
-            self.update_idletasks()
             messagebox.showinfo("Logged", "Marked as SKIPPED.")
 
-        ttk.Button(btn_frame, text="Take", command=do_take).pack(side="left", padx=6)
-        ttk.Button(btn_frame, text="Snooze 10 min", command=do_snooze).pack(side="left", padx=6)
-        ttk.Button(btn_frame, text="Skip", command=do_skip).pack(side="left", padx=6)
-
+        ttk.Button(btns, text="Take", command=do_take).pack(side="left", padx=6)
+        ttk.Button(btns, text="Snooze", command=do_snooze).pack(side="left", padx=6)
+        ttk.Button(btns, text="Skip", command=do_skip).pack(side="left", padx=6)
         ttk.Button(top, text="Close", command=top.destroy).pack(pady=(0,12))
+        top.update()  # paint immediately
 
-# ---------------
-# main
-# ---------------
+# ---------------- main ----------------
 if __name__ == "__main__":
     app = PillBoxApp()
     app.mainloop()
