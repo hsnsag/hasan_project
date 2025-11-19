@@ -21,7 +21,6 @@ try:
 except Exception:
     MATPLOTLIB_OK = False
 
-
 try:
     import pandas as pd
     PANDAS_OK = True
@@ -76,6 +75,13 @@ def write_all(path, headers, rows):
         for r in rows:
             w.writerow(r)
 
+def days_mask_to_names(mask):
+    """Convert '1010100' → 'Mon Wed Fri'"""
+    DAYS_LOCAL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    if len(mask) != 7:
+        return mask
+    return " ".join(DAYS_LOCAL[i] for i, ch in enumerate(mask) if ch == "1") or "(none)"
+
 # ---------------- SnoozeManager ----------------
 class SnoozeManager:
     def __init__(self, path=SNOOZE_CSV):
@@ -108,7 +114,9 @@ class SnoozeManager:
                 df = df[df["new_dt"].astype(str).str.startswith(today)]
                 for _, r in df.iterrows():
                     try:
-                        out[(str(r["med_id"]), str(r["scheduled_dt"]))] = datetime.strptime(str(r["new_dt"]), DATE_FMT)
+                        out[(str(r["med_id"]), str(r["scheduled_dt"]))] = datetime.strptime(
+                            str(r["new_dt"]), DATE_FMT
+                        )
                     except Exception:
                         pass
                 return out
@@ -118,7 +126,9 @@ class SnoozeManager:
             nd = str(r.get("new_dt", ""))
             if nd.startswith(today):
                 try:
-                    out[(str(r.get("med_id","")), str(r.get("scheduled_dt","")))] = datetime.strptime(nd, DATE_FMT)
+                    out[(str(r.get("med_id", "")), str(r.get("scheduled_dt", "")))] = datetime.strptime(
+                        nd, DATE_FMT
+                    )
                 except Exception:
                     pass
         return out
@@ -140,7 +150,7 @@ class SnoozeManager:
                 pass
         for r in read_rows(self.path):
             try:
-                if datetime.strptime(r.get("new_dt",""), DATE_FMT) > cutoff:
+                if datetime.strptime(r.get("new_dt", ""), DATE_FMT) > cutoff:
                     kept.append(r)
             except Exception:
                 pass
@@ -198,7 +208,7 @@ class PillBoxApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PillBox — Version 2 (Progress A, dropdowns + week view)")
-        self.geometry("980x720")
+        self.geometry("1120x720")
         self.resizable(False, False)
 
         # Style
@@ -234,7 +244,9 @@ class PillBoxApp(tk.Tk):
         self._build_edit_tab()
         self._build_summary_tab()
 
-        ttk.Label(self, text="PillBox v2 — Progress Report A", anchor="center").pack(side="bottom", fill="x", pady=6)
+        ttk.Label(self, text="PillBox v2 — Progress Report A", anchor="center").pack(
+            side="bottom", fill="x", pady=6
+        )
         self._update_grid_colors()
         self._scheduler_loop()
 
@@ -248,11 +260,11 @@ class PillBoxApp(tk.Tk):
         for d_off in range(7):
             d = monday + timedelta(days=d_off)
             for r in rows:
-                if str(r.get("active","1")).strip().lower() not in ["1","true","yes"]:
+                if str(r.get("active", "1")).strip().lower() not in ["1", "true", "yes"]:
                     continue
-                if not is_day_active(r.get("days_mask","1111111"), d):
+                if not is_day_active(r.get("days_mask", "1111111"), d):
                     continue
-                for part in (r.get("times_csv","") or "").split(","):
+                for part in (r.get("times_csv", "") or "").split(","):
                     p = part.strip()
                     if len(p) == 5 and p[2] == ":":
                         try:
@@ -263,20 +275,26 @@ class PillBoxApp(tk.Tk):
                             if d == today and (str(r["med_id"]), iso) in today_snoozes:
                                 sched = today_snoozes[(str(r["med_id"]), iso)]
                                 iso = sched.strftime(DATE_FMT)
-                            out.append({
-                                "med_id": str(r["med_id"]),
-                                "med_name": r["med_name"],
-                                "dose": r["dose"],
-                                "scheduled_dt": sched,
-                                "scheduled_iso": iso
-                            })
+                            out.append(
+                                {
+                                    "med_id": str(r["med_id"]),
+                                    "med_name": r["med_name"],
+                                    "dose": r["dose"],
+                                    "scheduled_dt": sched,
+                                    "scheduled_iso": iso,
+                                }
+                            )
                         except Exception:
                             pass
         return sorted(out, key=lambda d: d["scheduled_dt"])
 
     # ---------- grid tab ----------
     def _build_grid_tab(self):
-        ttk.Label(self.tab_grid, text="Weekly Pillbox (Mon–Sun × AM/Noon/PM/Bed)", style="Title.TLabel").pack(pady=(0,10))
+        ttk.Label(
+            self.tab_grid,
+            text="Weekly Pillbox (Mon–Sun × AM/Noon/PM/Bed)",
+            style="Title.TLabel",
+        ).pack(pady=(0, 10))
         frame = ttk.Frame(self.tab_grid)
         frame.pack(pady=10)
 
@@ -286,11 +304,13 @@ class PillBoxApp(tk.Tk):
 
         self.grid_labels = {}
         for i, bucket in enumerate(["AM", "Noon", "PM", "Bed"], start=1):
-            ttk.Label(frame, text=bucket, style="Bold.TLabel").grid(row=i, column=0, padx=6, pady=6, sticky="e")
+            ttk.Label(frame, text=bucket, style="Bold.TLabel").grid(
+                row=i, column=0, padx=6, pady=6, sticky="e"
+            )
             for j in range(1, 8):
                 lbl = tk.Label(frame, text=" ", width=18, height=3, relief="groove", bg="#f2f2f2")
                 lbl.grid(row=i, column=j, padx=3, pady=3)
-                self.grid_labels[(bucket, j-1)] = lbl
+                self.grid_labels[(bucket, j - 1)] = lbl
 
         legend = ttk.Frame(self.tab_grid)
         legend.pack(pady=8)
@@ -305,9 +325,12 @@ class PillBoxApp(tk.Tk):
             box.pack(side="left", padx=6)
             ttk.Label(legend, text=text).pack(side="left", padx=8)
 
-        btns = ttk.Frame(self.tab_grid); btns.pack(pady=6)
+        btns = ttk.Frame(self.tab_grid)
+        btns.pack(pady=6)
         ttk.Button(btns, text="Refresh", command=self._refresh_ui).pack(side="left", padx=4)
-        ttk.Button(btns, text="Clear old snoozes", command=lambda: self._clear_old_snoozes(1)).pack(side="left", padx=4)
+        ttk.Button(btns, text="Clear old snoozes", command=lambda: self._clear_old_snoozes(1)).pack(
+            side="left", padx=4
+        )
 
     def _clear_old_snoozes(self, keep_days):
         self.snooze_mgr.cleanup_old(keep_days)
@@ -326,8 +349,10 @@ class PillBoxApp(tk.Tk):
         week = self._build_week_schedule()
         logs = read_rows(LOG_CSV)
         # {(med_id, scheduled_iso): action}
-        act_map = {(r.get("med_id",""), r.get("scheduled_dt","")): (r.get("action","") or "")
-                   for r in logs}
+        act_map = {
+            (r.get("med_id", ""), r.get("scheduled_dt", "")): (r.get("action", "") or "")
+            for r in logs
+        }
 
         today = date.today()
         for item in week:
@@ -347,7 +372,10 @@ class PillBoxApp(tk.Tk):
                 elif a == "skipped":
                     cell.config(bg="#ffcccb", text=text)
                 elif a == "snoozed":
-                    cell.config(bg="#d0e0ff", text=f"{item['med_name']}\n(snoozed)\n{dt.strftime('%H:%M')}")
+                    cell.config(
+                        bg="#d0e0ff",
+                        text=f"{item['med_name']}\n(snoozed)\n{dt.strftime('%H:%M')}",
+                    )
                 else:
                     cell.config(text=text)
             else:
@@ -360,59 +388,119 @@ class PillBoxApp(tk.Tk):
 
     # ---------- Add/Edit tab ----------
     def _build_edit_tab(self):
-        ttk.Label(self.tab_edit, text="Add Medication", style="Title.TLabel").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0,8))
+        ttk.Label(
+            self.tab_edit, text="Add Medication", style="Title.TLabel"
+        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
 
-        # Name/Dose
-        ttk.Label(self.tab_edit, text="Name:", style="Label.TLabel").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+        # Name / Dose
+        ttk.Label(self.tab_edit, text="Name:", style="Label.TLabel").grid(
+            row=1, column=0, sticky="e", padx=6, pady=4
+        )
         self.ent_name = ttk.Entry(self.tab_edit, width=32)
         self.ent_name.grid(row=1, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(self.tab_edit, text="Dose (e.g., 500 mg):", style="Label.TLabel").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(self.tab_edit, text="Dose (e.g., 500 mg):", style="Label.TLabel").grid(
+            row=2, column=0, sticky="e", padx=6, pady=4
+        )
         self.ent_dose = ttk.Entry(self.tab_edit, width=32)
         self.ent_dose.grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        # Time picker (dropdowns)
-        ttk.Label(self.tab_edit, text="Add Time (24h):", style="Label.TLabel").grid(row=3, column=0, sticky="e", padx=6, pady=4)
+        # ---- Time pickers in one compact row ----
+        ttk.Label(self.tab_edit, text="Add Time (24h):", style="Label.TLabel").grid(
+            row=3, column=0, sticky="e", padx=6, pady=4
+        )
+
+        time_frame = ttk.Frame(self.tab_edit)
+        time_frame.grid(row=3, column=1, columnspan=3, sticky="w", padx=6, pady=4)
+
         hours = [f"{h:02d}" for h in range(24)]
         minutes = [f"{m:02d}" for m in range(0, 60, 5)]
-        self.cb_hour = ttk.Combobox(self.tab_edit, values=hours, width=4, state="readonly"); self.cb_hour.set("08")
-        self.cb_minute = ttk.Combobox(self.tab_edit, values=minutes, width=4, state="readonly"); self.cb_minute.set("00")
-        self.cb_hour.grid(row=3, column=1, sticky="w")
-        ttk.Label(self.tab_edit, text=":", style="Bold.TLabel").grid(row=3, column=2, sticky="w")
-        self.cb_minute.grid(row=3, column=3, sticky="w")
-        ttk.Button(self.tab_edit, text="Add time", command=self._add_time_to_list).grid(row=3, column=4, sticky="w", padx=6)
 
-        ttk.Label(self.tab_edit, text="Times:", style="Label.TLabel").grid(row=4, column=0, sticky="e", padx=6, pady=4)
+        self.cb_hour = ttk.Combobox(time_frame, values=hours, width=4, state="readonly")
+        self.cb_hour.set("08")
+        self.cb_hour.pack(side="left")
+
+        ttk.Label(time_frame, text=":", style="Bold.TLabel").pack(side="left", padx=(2, 2))
+
+        self.cb_minute = ttk.Combobox(time_frame, values=minutes, width=4, state="readonly")
+        self.cb_minute.set("00")
+        self.cb_minute.pack(side="left")
+
+        ttk.Button(time_frame, text="Add time", command=self._add_time_to_list).pack(
+            side="left", padx=(6, 0)
+        )
+
+        # Times list
+        ttk.Label(self.tab_edit, text="Times:", style="Label.TLabel").grid(
+            row=4, column=0, sticky="e", padx=6, pady=4
+        )
+
         self.times_listbox = tk.Listbox(self.tab_edit, height=4, width=18)
         self.times_listbox.grid(row=4, column=1, sticky="w", padx=6, pady=4)
-        ttk.Button(self.tab_edit, text="Remove selected", command=self._remove_selected_time).grid(row=4, column=2, sticky="w", padx=6)
+        ttk.Button(
+            self.tab_edit, text="Remove selected", command=self._remove_selected_time
+        ).grid(row=4, column=2, sticky="w", padx=6)
 
         self.current_times = []
 
         # Day checkboxes
-        ttk.Label(self.tab_edit, text="Days:", style="Label.TLabel").grid(row=5, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(self.tab_edit, text="Days:", style="Label.TLabel").grid(
+            row=5, column=0, sticky="e", padx=6, pady=4
+        )
         self.day_vars = [tk.BooleanVar(value=True) for _ in range(7)]
-        daysf = ttk.Frame(self.tab_edit); daysf.grid(row=5, column=1, columnspan=4, sticky="w")
+        daysf = ttk.Frame(self.tab_edit)
+        daysf.grid(row=5, column=1, columnspan=4, sticky="w")
         for i, d in enumerate(DAYS):
-            ttk.Checkbutton(daysf, text=d, variable=self.day_vars[i]).grid(row=0, column=i, padx=(0,6), sticky="w")
+            ttk.Checkbutton(daysf, text=d, variable=self.day_vars[i]).grid(
+                row=0, column=i, padx=(0, 6), sticky="w"
+            )
 
         # Active
         self.var_active = tk.BooleanVar(value=True)
-        ttk.Checkbutton(self.tab_edit, text="Active", variable=self.var_active).grid(row=6, column=1, sticky="w", padx=6, pady=4)
+        ttk.Checkbutton(self.tab_edit, text="Active", variable=self.var_active).grid(
+            row=6, column=1, sticky="w", padx=6, pady=4
+        )
 
         # Save
-        ttk.Button(self.tab_edit, text="Save Medication", command=self._save_medication).grid(row=7, column=1, sticky="w", padx=6, pady=(10,4))
+        ttk.Button(self.tab_edit, text="Save Medication", command=self._save_medication).grid(
+            row=7, column=1, sticky="w", padx=6, pady=(10, 4)
+        )
 
-        # Viewer
-        ttk.Label(self.tab_edit, text="Current Medications", style="Bold.TLabel").grid(row=8, column=0, columnspan=6, sticky="w", pady=(14,4))
-        self.tree = ttk.Treeview(self.tab_edit, columns=SCHEDULE_HEADERS, show="headings", height=8)
-        for c in SCHEDULE_HEADERS:
-            self.tree.heading(c, text=c)
-            self.tree.column(c, width=135, anchor="w")
-        self.tree.grid(row=9, column=0, columnspan=6, sticky="ew", padx=6, pady=6)
-        ttk.Button(self.tab_edit, text="Reload list", command=self._reload_schedule_view).grid(row=10, column=0, sticky="w", padx=6, pady=(0,10))
+        # Viewer (table)
+        ttk.Label(
+            self.tab_edit,
+            text="Current Medications",
+            style="Bold.TLabel",
+        ).grid(row=8, column=0, columnspan=6, sticky="w", pady=(14, 4))
 
+        view_cols = ["med_id", "med_name", "dose", "times_csv", "days", "active"]
+        self.tree = ttk.Treeview(self.tab_edit, columns=view_cols, show="headings", height=8)
+
+        col_widths = {
+            "med_id": 70,
+            "med_name": 160,
+            "dose": 120,
+            "times_csv": 160,
+            "days": 200,
+            "active": 70,
+        }
+
+        for col in view_cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=col_widths[col], anchor="w", stretch=True)
+
+        self.tree.grid(row=9, column=0, columnspan=6, sticky="nsew", padx=6, pady=6)
+
+        # allow resizing to avoid clipping
         self.tab_edit.columnconfigure(1, weight=1)
+        self.tab_edit.columnconfigure(2, weight=1)
+        self.tab_edit.columnconfigure(3, weight=1)
+        self.tab_edit.columnconfigure(4, weight=1)
+
+        ttk.Button(
+            self.tab_edit, text="Reload list", command=self._reload_schedule_view
+        ).grid(row=10, column=0, sticky="w", padx=6, pady=(0, 10))
+
         self._reload_schedule_view()
 
     def _add_time_to_list(self):
@@ -437,10 +525,21 @@ class PillBoxApp(tk.Tk):
         self.update_idletasks()
 
     def _reload_schedule_view(self):
+        # Clear previous rows
         for i in self.tree.get_children():
             self.tree.delete(i)
+
+        # Insert rows with readable day names
         for r in read_rows(SCHEDULE_CSV):
-            self.tree.insert("", tk.END, values=[r.get(h, "") for h in SCHEDULE_HEADERS])
+            display_row = [
+                r.get("med_id", ""),
+                r.get("med_name", ""),
+                r.get("dose", ""),
+                r.get("times_csv", ""),
+                days_mask_to_names(r.get("days_mask", "1111111")),
+                r.get("active", "1"),
+            ]
+            self.tree.insert("", tk.END, values=display_row)
 
     def _save_medication(self):
         name = self.ent_name.get().strip()
@@ -481,19 +580,28 @@ class PillBoxApp(tk.Tk):
 
     # ---------- Summary tab ----------
     def _build_summary_tab(self):
-        ttk.Label(self.tab_summary, text="Weekly Summary (last 7 days)", style="Title.TLabel").pack(anchor="w", pady=(0,8))
+        ttk.Label(
+            self.tab_summary,
+            text="Weekly Summary (last 7 days)",
+            style="Title.TLabel",
+        ).pack(anchor="w", pady=(0, 8))
         self.summary_container = ttk.Frame(self.tab_summary)
         self.summary_container.pack(fill="both", expand=True)
         self._draw_summary()
 
-        util = ttk.Frame(self.tab_summary); util.pack(pady=6)
-        ttk.Button(util, text="Refresh summary", command=self._draw_summary).pack(side="left", padx=4)
+        util = ttk.Frame(self.tab_summary)
+        util.pack(pady=6)
+        ttk.Button(util, text="Refresh summary", command=self._draw_summary).pack(
+            side="left", padx=4
+        )
 
     def _draw_summary(self):
         for w in self.summary_container.winfo_children():
             w.destroy()
         if not MATPLOTLIB_OK:
-            ttk.Label(self.summary_container, text="Matplotlib not available. Chart disabled.").pack(pady=16)
+            ttk.Label(
+                self.summary_container, text="Matplotlib not available. Chart disabled."
+            ).pack(pady=16)
             return
 
         logs = read_rows(LOG_CSV)
@@ -501,7 +609,7 @@ class PillBoxApp(tk.Tk):
         counts = {"taken": 0, "snoozed": 0, "skipped": 0}
         for r in logs:
             try:
-                when = datetime.strptime(r.get("actual_dt",""), DATE_FMT)
+                when = datetime.strptime(r.get("actual_dt", ""), DATE_FMT)
                 if when >= cutoff:
                     a = (r.get("action") or "").strip()
                     if a in counts:
@@ -529,7 +637,10 @@ class PillBoxApp(tk.Tk):
                 if item["scheduled_dt"].date() != today:
                     continue
                 sched = item["scheduled_dt"]
-                if abs((now - sched).total_seconds()) <= 60 and not is_already_logged(item["med_id"], sched):
+                if (
+                    abs((now - sched).total_seconds()) <= 60
+                    and not is_already_logged(item["med_id"], sched)
+                ):
                     self._show_due_popup(item)
                     break
         except Exception as e:
@@ -543,21 +654,35 @@ class PillBoxApp(tk.Tk):
         top.title("Dose Due")
         top.grab_set()
 
-        ttk.Label(top, text="Medication due now:", style="Bold.TLabel").pack(padx=16, pady=(16,8))
-        ttk.Label(top, text=f"{item['med_name']} — {item['dose']} (due {item['scheduled_dt'].strftime('%H:%M')})").pack(padx=16, pady=(0,12))
+        ttk.Label(top, text="Medication due now:", style="Bold.TLabel").pack(
+            padx=16, pady=(16, 8)
+        )
+        ttk.Label(
+            top,
+            text=f"{item['med_name']} — {item['dose']} (due {item['scheduled_dt'].strftime('%H:%M')})",
+        ).pack(padx=16, pady=(0, 12))
 
         # Snooze minutes dropdown
-        row = ttk.Frame(top); row.pack(pady=(0,10))
-        ttk.Label(row, text="Snooze for (minutes):").pack(side="left", padx=(0,6))
-        snooze_choices = ["5","10","15","30","60"]
+        row = ttk.Frame(top)
+        row.pack(pady=(0, 10))
+        ttk.Label(row, text="Snooze for (minutes):").pack(side="left", padx=(0, 6))
+        snooze_choices = ["5", "10", "15", "30", "60"]
         snooze_var = tk.StringVar(value="10")
-        ttk.Combobox(row, values=snooze_choices, width=5, textvariable=snooze_var, state="readonly").pack(side="left")
+        ttk.Combobox(
+            row,
+            values=snooze_choices,
+            width=5,
+            textvariable=snooze_var,
+            state="readonly",
+        ).pack(side="left")
 
-        btns = ttk.Frame(top); btns.pack(pady=10)
+        btns = ttk.Frame(top)
+        btns.pack(pady=10)
 
         def do_take():
             log_action(item["med_id"], item["scheduled_dt"], "taken", datetime.now())
-            self._update_grid_colors(); self.update_idletasks()
+            self._update_grid_colors()
+            self.update_idletasks()
             top.destroy()
             messagebox.showinfo("Logged", "Marked as TAKEN.")
 
@@ -569,20 +694,22 @@ class PillBoxApp(tk.Tk):
             new_dt = item["scheduled_dt"] + timedelta(minutes=mins)
             self.snooze_mgr.add(item["med_id"], item["scheduled_dt"], new_dt)
             log_action(item["med_id"], item["scheduled_dt"], "snoozed", datetime.now())
-            self._update_grid_colors(); self.update_idletasks()
+            self._update_grid_colors()
+            self.update_idletasks()
             top.destroy()
             messagebox.showinfo("Snoozed", f"Snoozed for {mins} minutes.")
 
         def do_skip():
             log_action(item["med_id"], item["scheduled_dt"], "skipped", datetime.now())
-            self._update_grid_colors(); self.update_idletasks()
+            self._update_grid_colors()
+            self.update_idletasks()
             top.destroy()
             messagebox.showinfo("Logged", "Marked as SKIPPED.")
 
         ttk.Button(btns, text="Take", command=do_take).pack(side="left", padx=6)
         ttk.Button(btns, text="Snooze", command=do_snooze).pack(side="left", padx=6)
         ttk.Button(btns, text="Skip", command=do_skip).pack(side="left", padx=6)
-        ttk.Button(top, text="Close", command=top.destroy).pack(pady=(0,12))
+        ttk.Button(top, text="Close", command=top.destroy).pack(pady=(0, 12))
         top.update()  # paint immediately
 
 # ---------------- main ----------------
