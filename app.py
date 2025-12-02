@@ -1,10 +1,11 @@
-# run_app.py — PillBox v2 (Progress A, dropdowns + week view, fixed geometry)
-# ----------------------------------------------------------------------------
-# - Week view (Mon–Sun)
-# - Dropdowns for hours/minutes, checkboxes for days
-# - Persistent snoozes in snoozes.csv (apply to TODAY only)
-# - “Due soon” highlight only for today
-# - Cleaner look, no mix of grid/pack in the Add/Edit tab
+# run_app.py — PillBox v2 (Version 2 progress, edit & delete)
+# --------------------------------------------------------------------
+# - Weekly grid (Mon–Sun × AM/Noon/PM/Bed)
+# - Add/Edit medications with time dropdowns and day checkboxes
+# - Current Medications table with readable day names
+# - Snooze manager with CSV persistence
+# - Summary chart (if matplotlib is installed)
+# - NEW: Edit selected medication, Delete (mark inactive)
 
 import csv
 import os
@@ -76,7 +77,7 @@ def write_all(path, headers, rows):
             w.writerow(r)
 
 def days_mask_to_names(mask):
-    """Convert '1010100' → 'Mon Wed Fri'"""
+    """Convert '1010100' → 'Mon Wed Fri'."""
     DAYS_LOCAL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     if len(mask) != 7:
         return mask
@@ -207,9 +208,13 @@ def is_already_logged(med_id, sched_dt):
 class PillBoxApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PillBox — Version 2 (Progress A, dropdowns + week view)")
-        self.geometry("1120x720")
+        self.title("PillBox — Version 2 (Progress)")
+        # wider window to show all 7 days and table columns
+        self.geometry("1200x720")
         self.resizable(False, False)
+
+        # current med being edited (None = new)
+        self.current_edit_med_id = None
 
         # Style
         try:
@@ -244,7 +249,7 @@ class PillBoxApp(tk.Tk):
         self._build_edit_tab()
         self._build_summary_tab()
 
-        ttk.Label(self, text="PillBox v2 — Progress Report A", anchor="center").pack(
+        ttk.Label(self, text="PillBox v2 — Version 2 progress", anchor="center").pack(
             side="bottom", fill="x", pady=6
         )
         self._update_grid_colors()
@@ -308,7 +313,7 @@ class PillBoxApp(tk.Tk):
                 row=i, column=0, padx=6, pady=6, sticky="e"
             )
             for j in range(1, 8):
-                lbl = tk.Label(frame, text=" ", width=18, height=3, relief="groove", bg="#f2f2f2")
+                lbl = tk.Label(frame, text=" ", width=16, height=3, relief="groove", bg="#f2f2f2")
                 lbl.grid(row=i, column=j, padx=3, pady=3)
                 self.grid_labels[(bucket, j - 1)] = lbl
 
@@ -481,7 +486,7 @@ class PillBoxApp(tk.Tk):
             "med_name": 160,
             "dose": 120,
             "times_csv": 160,
-            "days": 200,
+            "days": 220,
             "active": 70,
         }
 
@@ -497,9 +502,18 @@ class PillBoxApp(tk.Tk):
         self.tab_edit.columnconfigure(3, weight=1)
         self.tab_edit.columnconfigure(4, weight=1)
 
+        # Table action buttons
         ttk.Button(
             self.tab_edit, text="Reload list", command=self._reload_schedule_view
         ).grid(row=10, column=0, sticky="w", padx=6, pady=(0, 10))
+
+        ttk.Button(
+            self.tab_edit, text="Edit selected", command=self._edit_selected_med
+        ).grid(row=10, column=1, sticky="w", padx=6, pady=(0, 10))
+
+        ttk.Button(
+            self.tab_edit, text="Delete selected", command=self._delete_selected_med
+        ).grid(row=10, column=2, sticky="w", padx=6, pady=(0, 10))
 
         self._reload_schedule_view()
 
@@ -541,6 +555,105 @@ class PillBoxApp(tk.Tk):
             ]
             self.tree.insert("", tk.END, values=display_row)
 
+    # --------- NEW: helper to load a row into the form ---------
+    def _load_med_into_form(self, med_row):
+        """Fill the Add/Edit form from a med_row dict."""
+        # Name & dose
+        self.ent_name.delete(0, tk.END)
+        self.ent_name.insert(0, med_row.get("med_name", ""))
+
+        self.ent_dose.delete(0, tk.END)
+        self.ent_dose.insert(0, med_row.get("dose", ""))
+
+        # Times
+        self.current_times.clear()
+        self.times_listbox.delete(0, tk.END)
+        times_csv = med_row.get("times_csv", "")
+        for t in [p.strip() for p in times_csv.split(",") if p.strip()]:
+            self.current_times.append(t)
+        self.current_times.sort()
+        for t in self.current_times:
+            self.times_listbox.insert(tk.END, t)
+
+        # Days
+        mask = med_row.get("days_mask", "1111111")
+        for i, var in enumerate(self.day_vars):
+            bit = mask[i] if i < len(mask) else "0"
+            var.set(bit == "1")
+
+        # Active
+        active_val = str(med_row.get("active", "1")).strip().lower()
+        self.var_active.set(active_val in ["1", "true", "yes"])
+
+    def _edit_selected_med(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Edit", "Please select a medication in the table.")
+            return
+
+        values = self.tree.item(sel[0], "values")
+        med_id = str(values[0])
+        if not med_id:
+            messagebox.showwarning("Edit", "Selected row has no med_id.")
+            return
+
+        rows = read_rows(SCHEDULE_CSV)
+        target = None
+        for r in rows:
+            if str(r.get("med_id", "")) == med_id:
+                target = r
+                break
+
+        if target is None:
+            messagebox.showerror("Edit", f"Medication with id={med_id} not found in CSV.")
+            return
+
+        # store current id for update on save
+        self.current_edit_med_id = med_id
+        self._load_med_into_form(target)
+        self.tabs.select(self.tab_edit)
+        messagebox.showinfo("Edit", f"Loaded medication ID {med_id} for editing.\n"
+                                    "After changes, click 'Save Medication' to update.")
+
+    def _delete_selected_med(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Delete", "Please select a medication in the table.")
+            return
+
+        values = self.tree.item(sel[0], "values")
+        med_id = str(values[0])
+        if not med_id:
+            messagebox.showwarning("Delete", "Selected row has no med_id.")
+            return
+
+        ans = messagebox.askyesno(
+            "Delete",
+            f"Do you want to mark medication ID {med_id} as inactive?",
+        )
+        if not ans:
+            return
+
+        rows = read_rows(SCHEDULE_CSV)
+        changed = False
+        for r in rows:
+            if str(r.get("med_id", "")) == med_id:
+                r["active"] = "0"
+                changed = True
+
+        if not changed:
+            messagebox.showerror("Delete", f"Medication with id={med_id} not found.")
+            return
+
+        write_all(SCHEDULE_CSV, SCHEDULE_HEADERS, rows)
+        if self.current_edit_med_id == med_id:
+            self.current_edit_med_id = None
+
+        self._reload_schedule_view()
+        self._update_grid_colors()
+        self.update_idletasks()
+        messagebox.showinfo("Delete", f"Medication {med_id} has been marked inactive.")
+
     def _save_medication(self):
         name = self.ent_name.get().strip()
         dose = self.ent_dose.get().strip()
@@ -556,17 +669,39 @@ class PillBoxApp(tk.Tk):
             return
 
         rows = read_rows(SCHEDULE_CSV)
-        new_id = next_med_id(rows)
-        row = {
-            "med_id": str(new_id),
-            "med_name": name,
-            "dose": dose,
-            "times_csv": ",".join(times),
-            "days_mask": days_mask,
-            "active": active,
-        }
-        append_row(SCHEDULE_CSV, SCHEDULE_HEADERS, row)
-        messagebox.showinfo("Saved", f"Medication '{name}' added (id={new_id}).")
+
+        # If editing an existing medication, update it
+        if self.current_edit_med_id is not None:
+            med_id = self.current_edit_med_id
+            updated = False
+            for r in rows:
+                if str(r.get("med_id", "")) == med_id:
+                    r["med_name"] = name
+                    r["dose"] = dose
+                    r["times_csv"] = ",".join(times)
+                    r["days_mask"] = days_mask
+                    r["active"] = active
+                    updated = True
+                    break
+            if not updated:
+                messagebox.showerror("Save", f"Could not find medication id={med_id} to update.")
+                return
+            write_all(SCHEDULE_CSV, SCHEDULE_HEADERS, rows)
+            messagebox.showinfo("Saved", f"Medication id={med_id} updated.")
+            self.current_edit_med_id = None
+        else:
+            # New medication
+            new_id = next_med_id(rows)
+            row = {
+                "med_id": str(new_id),
+                "med_name": name,
+                "dose": dose,
+                "times_csv": ",".join(times),
+                "days_mask": days_mask,
+                "active": active,
+            }
+            append_row(SCHEDULE_CSV, SCHEDULE_HEADERS, row)
+            messagebox.showinfo("Saved", f"Medication '{name}' added (id={new_id}).")
 
         self._reload_schedule_view()
         self._update_grid_colors()
