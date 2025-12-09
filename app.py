@@ -1,11 +1,20 @@
-# run_app.py — PillBox v2 (Version 2 progress, edit & delete)
-# --------------------------------------------------------------------
-# - Weekly grid (Mon–Sun × AM/Noon/PM/Bed)
-# - Add/Edit medications with time dropdowns and day checkboxes
-# - Current Medications table with readable day names
-# - Snooze manager with CSV persistence
-# - Summary chart (if matplotlib is installed)
-# - NEW: Edit selected medication, Delete (mark inactive)
+"""PillBox v2 — weekly medication reminder app.
+
+This module implements a small desktop application (Tkinter) that:
+
+- Lets the user add medications with name, dose, times, days of week, and active flag.
+- Shows a weekly pillbox grid (Mon–Sun × AM/Noon/PM/Bed) with color-coded status.
+- Pops up reminders when a dose is due (Take / Snooze / Skip).
+- Logs actions to CSV files and shows a simple 7-day summary chart.
+
+Data files (all auto-created if missing):
+    med_schedule.csv : master medication schedule
+    dose_log.csv     : log of actions (taken / skipped / snoozed)
+    snoozes.csv      : today's snoozed doses
+
+This file is the main entry point of the project. Run it with:
+    python run_app.py
+"""
 
 import csv
 import os
@@ -20,12 +29,14 @@ try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     MATPLOTLIB_OK = True
 except Exception:
+    # App still works, but the Summary chart will be disabled.
     MATPLOTLIB_OK = False
 
 try:
     import pandas as pd
     PANDAS_OK = True
 except Exception:
+    # SnoozeManager falls back to pure csv logic if pandas is not available.
     PANDAS_OK = False
 
 # ---------------- Files / headers ----------------
@@ -40,7 +51,7 @@ SNOOZE_HEADERS = ["med_id", "scheduled_dt", "new_dt"]
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 DATE_FMT = "%Y-%m-%d %H:%M"
 
-# Grid buckets by hour
+# Grid buckets by hour (simple grouping for weekly view)
 BUCKETS = {
     "AM": range(5, 12),
     "Noon": range(12, 15),
@@ -48,19 +59,44 @@ BUCKETS = {
     "Bed": list(range(20, 24)) + list(range(0, 5)),
 }
 
+
 # ---------------- CSV helpers ----------------
-def ensure_csv(path, headers):
+def ensure_csv(path: str, headers: list[str]) -> None:
+    """Create a CSV file with given headers if it does not exist.
+
+    Args:
+        path: File path of the CSV file.
+        headers: List of header strings to write as first row.
+    """
     if not os.path.exists(path):
         with open(path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(headers)
 
-def read_rows(path):
+
+def read_rows(path: str) -> list[dict]:
+    """Read all rows from a CSV file as a list of dicts.
+
+    Args:
+        path: File path of the CSV file.
+
+    Returns:
+        List of rows; each row is a dict mapping column name to value.
+        Returns an empty list if the file does not exist.
+    """
     if not os.path.exists(path):
         return []
     with open(path, "r", newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
-def append_row(path, headers, row):
+
+def append_row(path: str, headers: list[str], row: dict) -> None:
+    """Append a single row to a CSV, creating it if necessary.
+
+    Args:
+        path: File path of the CSV file.
+        headers: Column headers for the file.
+        row: Mapping of column name to value.
+    """
     ensure_csv(path, headers)
     file_exists = os.path.exists(path) and os.path.getsize(path) > 0
     with open(path, "a", newline="", encoding="utf-8") as f:
@@ -69,32 +105,77 @@ def append_row(path, headers, row):
             w.writeheader()
         w.writerow(row)
 
-def write_all(path, headers, rows):
+
+def write_all(path: str, headers: list[str], rows: list[dict]) -> None:
+    """Overwrite a CSV file with the given rows and headers.
+
+    Args:
+        path: File path of the CSV file.
+        headers: Column headers.
+        rows: List of dict rows to write.
+    """
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=headers)
         w.writeheader()
         for r in rows:
             w.writerow(r)
 
-def days_mask_to_names(mask):
-    """Convert '1010100' → 'Mon Wed Fri'."""
+
+def days_mask_to_names(mask: str) -> str:
+    """Convert binary days mask to human-readable names.
+
+    Example:
+        '1010100' -> 'Mon Wed Fri'
+
+    Args:
+        mask: String of length 7 with '1' for active days and '0' otherwise.
+
+    Returns:
+        Space-separated day names or '(none)' if no bits are set.
+    """
     DAYS_LOCAL = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     if len(mask) != 7:
-        return mask
+        return mask  # GOTCHA: if corrupt data, just show mask as-is.
     return " ".join(DAYS_LOCAL[i] for i, ch in enumerate(mask) if ch == "1") or "(none)"
+
 
 # ---------------- SnoozeManager ----------------
 class SnoozeManager:
-    def __init__(self, path=SNOOZE_CSV):
+    """Manage snoozed doses persisted in snoozes.csv.
+
+    Responsibilities:
+        - Add snooze entries (med_id, scheduled_dt -> new_dt).
+        - Return today's snoozes as a mapping for overrides.
+        - Clean up old snoozes (older than N days).
+
+    Note:
+        This class uses pandas if available for convenience,
+        but falls back to pure-csv logic otherwise.
+    """
+
+    def __init__(self, path: str = SNOOZE_CSV) -> None:
+        """Initialize the manager and ensure the CSV exists.
+
+        Args:
+            path: CSV file path for snooze data.
+        """
         self.path = path
         ensure_csv(self.path, SNOOZE_HEADERS)
 
-    def add(self, med_id, scheduled_dt, new_dt):
+    def add(self, med_id: str, scheduled_dt: datetime, new_dt: datetime) -> None:
+        """Record a snoozed dose in the CSV.
+
+        Args:
+            med_id: Medication ID as string or int.
+            scheduled_dt: Original scheduled datetime.
+            new_dt: New snoozed datetime (when it should alert instead).
+        """
         row = {
             "med_id": str(med_id),
             "scheduled_dt": scheduled_dt.strftime(DATE_FMT),
             "new_dt": new_dt.strftime(DATE_FMT),
         }
+
         if PANDAS_OK:
             try:
                 df = pd.read_csv(self.path)
@@ -102,13 +183,21 @@ class SnoozeManager:
                 df.to_csv(self.path, index=False)
                 return
             except Exception:
+                # GOTCHA: if pandas fails for some reason, default back to csv.
                 pass
+
         append_row(self.path, SNOOZE_HEADERS, row)
 
-    def get_today(self):
-        """Return {(med_id, scheduled_iso): new_dt} for today only."""
+    def get_today(self) -> dict[tuple[str, str], datetime]:
+        """Get all snoozes for the current day.
+
+        Returns:
+            Dictionary mapping (med_id, scheduled_dt_string) -> new_dt (datetime)
+            for snoozes where new_dt is on today's date.
+        """
         today = datetime.now().strftime("%Y-%m-%d")
-        out = {}
+        out: dict[tuple[str, str], datetime] = {}
+
         if PANDAS_OK:
             try:
                 df = pd.read_csv(self.path)
@@ -119,10 +208,13 @@ class SnoozeManager:
                             str(r["new_dt"]), DATE_FMT
                         )
                     except Exception:
+                        # Ignore malformed rows.
                         pass
                 return out
             except Exception:
                 pass
+
+        # Fallback: manual CSV parsing
         for r in read_rows(self.path):
             nd = str(r.get("new_dt", ""))
             if nd.startswith(today):
@@ -134,9 +226,15 @@ class SnoozeManager:
                     pass
         return out
 
-    def cleanup_old(self, keep_days=1):
+    def cleanup_old(self, keep_days: int = 1) -> None:
+        """Remove snoozes older than the given number of days.
+
+        Args:
+            keep_days: How many days back to keep snoozes.
+        """
         cutoff = datetime.now() - timedelta(days=keep_days)
-        kept = []
+        kept: list[dict] = []
+
         if PANDAS_OK:
             try:
                 df = pd.read_csv(self.path)
@@ -149,29 +247,67 @@ class SnoozeManager:
                 return
             except Exception:
                 pass
+
         for r in read_rows(self.path):
             try:
                 if datetime.strptime(r.get("new_dt", ""), DATE_FMT) > cutoff:
                     kept.append(r)
             except Exception:
                 pass
+
         write_all(self.path, SNOOZE_HEADERS, kept)
 
+
 # ---------------- helpers ----------------
-def coerce_days_mask_from_bools(day_bools):
-    # Monday=0 .. Sunday=6
+def coerce_days_mask_from_bools(day_bools: list[bool]) -> str:
+    """Convert list of booleans into 7-character day mask.
+
+    Args:
+        day_bools: List of 7 booleans, Monday index 0 through Sunday index 6.
+
+    Returns:
+        String of '1'/'0' characters (length 7).
+    """
     return "".join("1" if b else "0" for b in day_bools)
 
-def is_day_active(mask, d):
+
+def is_day_active(mask: str, d: date) -> bool:
+    """Check whether the given date is active according to the mask.
+
+    Args:
+        mask: 7-character days mask ('1'/'0').
+        d: Date to check.
+
+    Returns:
+        True if mask at weekday index is '1', else False.
+    """
     return len(mask) == 7 and mask[d.weekday()] == "1"
 
-def bucket_for_hour(h):
+
+def bucket_for_hour(h: int) -> str:
+    """Return label of time bucket for the given hour.
+
+    Args:
+        h: Hour in 0..23.
+
+    Returns:
+        One of 'AM', 'Noon', 'PM', 'Bed'.
+    """
     for label, hours in BUCKETS.items():
         if h in hours:
             return label
     return "AM"
 
-def next_med_id(rows):
+
+def next_med_id(rows: list[dict]) -> int:
+    """Return next integer medication ID based on existing rows.
+
+    Args:
+        rows: List of existing schedule rows.
+
+    Returns:
+        Integer > max existing ID (or 1 if none).
+    """
     max_id = 0
     for r in rows:
         try:
@@ -180,7 +316,16 @@ def next_med_id(rows):
             pass
     return max_id + 1
 
-def log_action(med_id, sched_dt, action, actual_dt=None):
+
+def log_action(med_id: str, sched_dt: datetime, action: str, actual_dt: datetime | None = None) -> None:
+    """Append a log entry to dose_log.csv.
+
+    Args:
+        med_id: Medication ID.
+        sched_dt: Scheduled datetime for the dose.
+        action: One of 'taken', 'skipped', 'snoozed'.
+        actual_dt: When the user actually took the action (defaults to now).
+    """
     rows = read_rows(LOG_CSV)
     next_id = 1
     for r in rows:
@@ -188,6 +333,7 @@ def log_action(med_id, sched_dt, action, actual_dt=None):
             next_id = max(next_id, int(r["log_id"]) + 1)
         except Exception:
             pass
+
     row = {
         "log_id": str(next_id),
         "med_id": str(med_id),
@@ -197,26 +343,49 @@ def log_action(med_id, sched_dt, action, actual_dt=None):
     }
     append_row(LOG_CSV, LOG_HEADERS, row)
 
-def is_already_logged(med_id, sched_dt):
+
+def is_already_logged(med_id: str, sched_dt: datetime) -> bool:
+    """Check if an action has already been logged for this med/time pair.
+
+    Args:
+        med_id: Medication ID.
+        sched_dt: Scheduled datetime.
+
+    Returns:
+        True if there is already a row for (med_id, scheduled_dt).
+    """
     key = (str(med_id), sched_dt.strftime(DATE_FMT))
     for r in read_rows(LOG_CSV):
         if r.get("med_id") == key[0] and r.get("scheduled_dt") == key[1]:
             return True
     return False
 
+
 # ---------------- Tkinter app ----------------
 class PillBoxApp(tk.Tk):
-    def __init__(self):
+    """Main Tkinter application for the PillBox GUI.
+
+    Responsibilities:
+        - Create and manage three tabs: Pillbox, Add/Edit, Summary.
+        - Keep the weekly grid in sync with the schedule and logs.
+        - Handle user input (add/edit/delete meds).
+        - Show due popups and log user actions.
+        - Orchestrate the SnoozeManager and summary chart.
+    """
+
+    def __init__(self) -> None:
+        """Initialize the main window and build all UI tabs."""
         super().__init__()
         self.title("PillBox — Version 2 (Progress)")
-        # wider window to show all 7 days and table columns
+        # Wider window to show all 7 days and table columns.
         self.geometry("1200x720")
         self.resizable(False, False)
 
-        # current med being edited (None = new)
-        self.current_edit_med_id = None
+        # Track which medication (by med_id) is currently being edited.
+        # None -> "add new"; not None -> "update existing".
+        self.current_edit_med_id: str | None = None
 
-        # Style
+        # ----- Tk style setup -----
         try:
             style = ttk.Style(self)
             style.theme_use("clam")
@@ -225,9 +394,10 @@ class PillBoxApp(tk.Tk):
             style.configure("Bold.TLabel", font=("Segoe UI", 10, "bold"))
             style.configure("TButton", padding=6)
         except Exception:
+            # GOTCHA: style/theme is not critical; ignore failures.
             pass
 
-        # CSVs
+        # ----- CSV files -----
         ensure_csv(SCHEDULE_CSV, SCHEDULE_HEADERS)
         ensure_csv(LOG_CSV, LOG_HEADERS)
         ensure_csv(SNOOZE_CSV, SNOOZE_HEADERS)
@@ -235,11 +405,12 @@ class PillBoxApp(tk.Tk):
         self.snooze_mgr = SnoozeManager()
         self.snooze_mgr.cleanup_old(keep_days=2)
 
-        # Tabs
+        # ----- Tabs -----
         self.tabs = ttk.Notebook(self)
         self.tab_grid = ttk.Frame(self.tabs, padding=12)
         self.tab_edit = ttk.Frame(self.tabs, padding=12)
         self.tab_summary = ttk.Frame(self.tabs, padding=12)
+
         self.tabs.add(self.tab_grid, text="Pillbox")
         self.tabs.add(self.tab_edit, text="Add/Edit")
         self.tabs.add(self.tab_summary, text="Summary")
@@ -252,23 +423,35 @@ class PillBoxApp(tk.Tk):
         ttk.Label(self, text="PillBox v2 — Version 2 progress", anchor="center").pack(
             side="bottom", fill="x", pady=6
         )
+
+        # Initial draw + scheduler loop.
         self._update_grid_colors()
         self._scheduler_loop()
 
     # ---------- week schedule (Mon..Sun) ----------
-    def _build_week_schedule(self):
+    def _build_week_schedule(self) -> list[dict]:
+        """Build a sorted list of all scheduled doses for the current week.
+
+        Returns:
+            List of dicts with keys:
+                med_id, med_name, dose, scheduled_dt, scheduled_iso
+            Snoozes for *today* are applied as overrides.
+        """
         rows = read_rows(SCHEDULE_CSV)
         today = date.today()
         monday = today - timedelta(days=today.weekday())
         today_snoozes = self.snooze_mgr.get_today()
-        out = []
+        out: list[dict] = []
+
         for d_off in range(7):
             d = monday + timedelta(days=d_off)
             for r in rows:
+                # Only active meds are scheduled
                 if str(r.get("active", "1")).strip().lower() not in ["1", "true", "yes"]:
                     continue
                 if not is_day_active(r.get("days_mask", "1111111"), d):
                     continue
+
                 for part in (r.get("times_csv", "") or "").split(","):
                     p = part.strip()
                     if len(p) == 5 and p[2] == ":":
@@ -276,10 +459,12 @@ class PillBoxApp(tk.Tk):
                             hh, mm = map(int, p.split(":"))
                             sched = datetime.combine(d, time(hh, mm))
                             iso = sched.strftime(DATE_FMT)
-                            # apply snoozes to TODAY only
+
+                            # Apply snoozes only to today's doses
                             if d == today and (str(r["med_id"]), iso) in today_snoozes:
                                 sched = today_snoozes[(str(r["med_id"]), iso)]
                                 iso = sched.strftime(DATE_FMT)
+
                             out.append(
                                 {
                                     "med_id": str(r["med_id"]),
@@ -291,23 +476,29 @@ class PillBoxApp(tk.Tk):
                             )
                         except Exception:
                             pass
+
         return sorted(out, key=lambda d: d["scheduled_dt"])
 
     # ---------- grid tab ----------
-    def _build_grid_tab(self):
+    def _build_grid_tab(self) -> None:
+        """Create the weekly grid tab (Pillbox view)."""
         ttk.Label(
             self.tab_grid,
             text="Weekly Pillbox (Mon–Sun × AM/Noon/PM/Bed)",
             style="Title.TLabel",
         ).pack(pady=(0, 10))
+
         frame = ttk.Frame(self.tab_grid)
         frame.pack(pady=10)
 
+        # Header row: empty cell + day labels
         ttk.Label(frame, text="", style="Bold.TLabel").grid(row=0, column=0, padx=6, pady=6)
         for j, day in enumerate(DAYS, start=1):
             ttk.Label(frame, text=day, style="Bold.TLabel").grid(row=0, column=j, padx=6, pady=6)
 
-        self.grid_labels = {}
+        self.grid_labels: dict[tuple[str, int], tk.Label] = {}
+
+        # Create one label per bucket/day.
         for i, bucket in enumerate(["AM", "Noon", "PM", "Bed"], start=1):
             ttk.Label(frame, text=bucket, style="Bold.TLabel").grid(
                 row=i, column=0, padx=6, pady=6, sticky="e"
@@ -317,6 +508,7 @@ class PillBoxApp(tk.Tk):
                 lbl.grid(row=i, column=j, padx=3, pady=3)
                 self.grid_labels[(bucket, j - 1)] = lbl
 
+        # Legend for colors
         legend = ttk.Frame(self.tab_grid)
         legend.pack(pady=8)
         for color, text in [
@@ -330,6 +522,7 @@ class PillBoxApp(tk.Tk):
             box.pack(side="left", padx=6)
             ttk.Label(legend, text=text).pack(side="left", padx=8)
 
+        # Utility buttons
         btns = ttk.Frame(self.tab_grid)
         btns.pack(pady=6)
         ttk.Button(btns, text="Refresh", command=self._refresh_ui).pack(side="left", padx=4)
@@ -337,29 +530,35 @@ class PillBoxApp(tk.Tk):
             side="left", padx=4
         )
 
-    def _clear_old_snoozes(self, keep_days):
+    def _clear_old_snoozes(self, keep_days: int) -> None:
+        """Button handler: remove snoozes older than keep_days days."""
         self.snooze_mgr.cleanup_old(keep_days)
         messagebox.showinfo("Snoozes", f"Old snoozes cleared (> {keep_days} day).")
 
-    def _refresh_ui(self):
+    def _refresh_ui(self) -> None:
+        """Refresh grid colors and summary chart."""
         self._update_grid_colors()
         self._draw_summary()
         self.update_idletasks()
 
-    def _update_grid_colors(self):
-        # reset
+    def _update_grid_colors(self) -> None:
+        """Fill the weekly grid based on schedule, logs and snoozes."""
+        # Reset all cells to idle.
         for lbl in self.grid_labels.values():
             lbl.config(bg="#f2f2f2", text=" ")
 
         week = self._build_week_schedule()
         logs = read_rows(LOG_CSV)
-        # {(med_id, scheduled_iso): action}
+
+        # Map (med_id, scheduled_iso) -> action string
         act_map = {
             (r.get("med_id", ""), r.get("scheduled_dt", "")): (r.get("action", "") or "")
             for r in logs
         }
 
         today = date.today()
+        now = datetime.now()
+
         for item in week:
             dt = item["scheduled_dt"]
             bucket = bucket_for_hour(dt.hour)
@@ -384,7 +583,8 @@ class PillBoxApp(tk.Tk):
                 else:
                     cell.config(text=text)
             else:
-                if dt.date() == today and abs((datetime.now() - dt).total_seconds()) <= 15 * 60:
+                # Highlight "due soon" for today's items only (±15 minutes)
+                if dt.date() == today and abs((now - dt).total_seconds()) <= 15 * 60:
                     cell.config(bg="#fff59d", text=text)
                 else:
                     cell.config(text=text)
@@ -392,7 +592,8 @@ class PillBoxApp(tk.Tk):
         self.update_idletasks()
 
     # ---------- Add/Edit tab ----------
-    def _build_edit_tab(self):
+    def _build_edit_tab(self) -> None:
+        """Create the Add/Edit tab with form + current medications table."""
         ttk.Label(
             self.tab_edit, text="Add Medication", style="Title.TLabel"
         ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
@@ -446,7 +647,7 @@ class PillBoxApp(tk.Tk):
             self.tab_edit, text="Remove selected", command=self._remove_selected_time
         ).grid(row=4, column=2, sticky="w", padx=6)
 
-        self.current_times = []
+        self.current_times: list[str] = []
 
         # Day checkboxes
         ttk.Label(self.tab_edit, text="Days:", style="Label.TLabel").grid(
@@ -496,7 +697,7 @@ class PillBoxApp(tk.Tk):
 
         self.tree.grid(row=9, column=0, columnspan=6, sticky="nsew", padx=6, pady=6)
 
-        # allow resizing to avoid clipping
+        # Allow some expansion to avoid clipping
         self.tab_edit.columnconfigure(1, weight=1)
         self.tab_edit.columnconfigure(2, weight=1)
         self.tab_edit.columnconfigure(3, weight=1)
@@ -517,7 +718,8 @@ class PillBoxApp(tk.Tk):
 
         self._reload_schedule_view()
 
-    def _add_time_to_list(self):
+    def _add_time_to_list(self) -> None:
+        """Add selected hour:minute from the combo boxes to the current_times list."""
         hh, mm = self.cb_hour.get(), self.cb_minute.get()
         if hh and mm:
             val = f"{hh}:{mm}"
@@ -529,7 +731,8 @@ class PillBoxApp(tk.Tk):
                     self.times_listbox.insert(tk.END, t)
         self.update_idletasks()
 
-    def _remove_selected_time(self):
+    def _remove_selected_time(self) -> None:
+        """Remove currently selected time from the listbox and current_times."""
         sel = self.times_listbox.curselection()
         if sel:
             val = self.times_listbox.get(sel[0])
@@ -538,7 +741,8 @@ class PillBoxApp(tk.Tk):
             self.times_listbox.delete(sel[0])
         self.update_idletasks()
 
-    def _reload_schedule_view(self):
+    def _reload_schedule_view(self) -> None:
+        """Reload the Current Medications table from med_schedule.csv."""
         # Clear previous rows
         for i in self.tree.get_children():
             self.tree.delete(i)
@@ -555,9 +759,9 @@ class PillBoxApp(tk.Tk):
             ]
             self.tree.insert("", tk.END, values=display_row)
 
-    # --------- NEW: helper to load a row into the form ---------
-    def _load_med_into_form(self, med_row):
-        """Fill the Add/Edit form from a med_row dict."""
+    # --------- helper to load a row into the form ---------
+    def _load_med_into_form(self, med_row: dict) -> None:
+        """Fill the Add/Edit form from a schedule row dict."""
         # Name & dose
         self.ent_name.delete(0, tk.END)
         self.ent_name.insert(0, med_row.get("med_name", ""))
@@ -585,7 +789,8 @@ class PillBoxApp(tk.Tk):
         active_val = str(med_row.get("active", "1")).strip().lower()
         self.var_active.set(active_val in ["1", "true", "yes"])
 
-    def _edit_selected_med(self):
+    def _edit_selected_med(self) -> None:
+        """Load the selected medication row into the form for editing."""
         sel = self.tree.selection()
         if not sel:
             messagebox.showwarning("Edit", "Please select a medication in the table.")
@@ -608,14 +813,18 @@ class PillBoxApp(tk.Tk):
             messagebox.showerror("Edit", f"Medication with id={med_id} not found in CSV.")
             return
 
-        # store current id for update on save
+        # Store current id for update on save
         self.current_edit_med_id = med_id
         self._load_med_into_form(target)
         self.tabs.select(self.tab_edit)
-        messagebox.showinfo("Edit", f"Loaded medication ID {med_id} for editing.\n"
-                                    "After changes, click 'Save Medication' to update.")
+        messagebox.showinfo(
+            "Edit",
+            f"Loaded medication ID {med_id} for editing.\n"
+            "After changes, click 'Save Medication' to update.",
+        )
 
-    def _delete_selected_med(self):
+    def _delete_selected_med(self) -> None:
+        """Mark the selected medication as inactive (soft delete)."""
         sel = self.tree.selection()
         if not sel:
             messagebox.showwarning("Delete", "Please select a medication in the table.")
@@ -654,7 +863,13 @@ class PillBoxApp(tk.Tk):
         self.update_idletasks()
         messagebox.showinfo("Delete", f"Medication {med_id} has been marked inactive.")
 
-    def _save_medication(self):
+    def _save_medication(self) -> None:
+        """Save the current form as either a new medication or an update.
+
+        Behavior:
+            - If current_edit_med_id is None -> create a new schedule row.
+            - Otherwise -> update that existing med_id in med_schedule.csv.
+        """
         name = self.ent_name.get().strip()
         dose = self.ent_dose.get().strip()
         times = list(self.current_times)
@@ -670,7 +885,7 @@ class PillBoxApp(tk.Tk):
 
         rows = read_rows(SCHEDULE_CSV)
 
-        # If editing an existing medication, update it
+        # Editing an existing medication
         if self.current_edit_med_id is not None:
             med_id = self.current_edit_med_id
             updated = False
@@ -707,19 +922,21 @@ class PillBoxApp(tk.Tk):
         self._update_grid_colors()
         self.update_idletasks()
 
-        # clear inputs
+        # Clear inputs for next time.
         self.ent_name.delete(0, tk.END)
         self.ent_dose.delete(0, tk.END)
         self.current_times.clear()
         self.times_listbox.delete(0, tk.END)
 
     # ---------- Summary tab ----------
-    def _build_summary_tab(self):
+    def _build_summary_tab(self) -> None:
+        """Create the Summary tab with 7-day action counts."""
         ttk.Label(
             self.tab_summary,
             text="Weekly Summary (last 7 days)",
             style="Title.TLabel",
         ).pack(anchor="w", pady=(0, 8))
+
         self.summary_container = ttk.Frame(self.tab_summary)
         self.summary_container.pack(fill="both", expand=True)
         self._draw_summary()
@@ -730,9 +947,11 @@ class PillBoxApp(tk.Tk):
             side="left", padx=4
         )
 
-    def _draw_summary(self):
+    def _draw_summary(self) -> None:
+        """Render a simple bar chart of counts of taken/snoozed/skipped in last 7 days."""
         for w in self.summary_container.winfo_children():
             w.destroy()
+
         if not MATPLOTLIB_OK:
             ttk.Label(
                 self.summary_container, text="Matplotlib not available. Chart disabled."
@@ -742,6 +961,7 @@ class PillBoxApp(tk.Tk):
         logs = read_rows(LOG_CSV)
         cutoff = datetime.now() - timedelta(days=7)
         counts = {"taken": 0, "snoozed": 0, "skipped": 0}
+
         for r in logs:
             try:
                 when = datetime.strptime(r.get("actual_dt", ""), DATE_FMT)
@@ -764,7 +984,8 @@ class PillBoxApp(tk.Tk):
         self.update_idletasks()
 
     # ---------- scheduler (today only for popups) ----------
-    def _scheduler_loop(self):
+    def _scheduler_loop(self) -> None:
+        """Periodic loop: check for due doses for today and show popup if needed."""
         try:
             now = datetime.now()
             today = date.today()
@@ -772,6 +993,7 @@ class PillBoxApp(tk.Tk):
                 if item["scheduled_dt"].date() != today:
                     continue
                 sched = item["scheduled_dt"]
+                # Within 60 seconds of scheduled time and not yet logged?
                 if (
                     abs((now - sched).total_seconds()) <= 60
                     and not is_already_logged(item["med_id"], sched)
@@ -779,12 +1001,19 @@ class PillBoxApp(tk.Tk):
                     self._show_due_popup(item)
                     break
         except Exception as e:
+            # GOTCHA: logging only to console; in a bigger app we might want a log file.
             print("Scheduler error:", e)
 
         self._update_grid_colors()
+        # Re-run scheduler every 10 seconds.
         self.after(10_000, self._scheduler_loop)
 
-    def _show_due_popup(self, item):
+    def _show_due_popup(self, item: dict) -> None:
+        """Show a modal popup when a dose is due.
+
+        Args:
+            item: Dict with medication info and scheduled_dt.
+        """
         top = tk.Toplevel(self)
         top.title("Dose Due")
         top.grab_set()
@@ -814,14 +1043,16 @@ class PillBoxApp(tk.Tk):
         btns = ttk.Frame(top)
         btns.pack(pady=10)
 
-        def do_take():
+        def do_take() -> None:
+            """Mark dose as taken and update grid."""
             log_action(item["med_id"], item["scheduled_dt"], "taken", datetime.now())
             self._update_grid_colors()
             self.update_idletasks()
             top.destroy()
             messagebox.showinfo("Logged", "Marked as TAKEN.")
 
-        def do_snooze():
+        def do_snooze() -> None:
+            """Snooze dose for selected minutes and log it."""
             try:
                 mins = int(snooze_var.get())
             except Exception:
@@ -834,7 +1065,8 @@ class PillBoxApp(tk.Tk):
             top.destroy()
             messagebox.showinfo("Snoozed", f"Snoozed for {mins} minutes.")
 
-        def do_skip():
+        def do_skip() -> None:
+            """Mark dose as skipped and update grid."""
             log_action(item["med_id"], item["scheduled_dt"], "skipped", datetime.now())
             self._update_grid_colors()
             self.update_idletasks()
@@ -845,9 +1077,11 @@ class PillBoxApp(tk.Tk):
         ttk.Button(btns, text="Snooze", command=do_snooze).pack(side="left", padx=6)
         ttk.Button(btns, text="Skip", command=do_skip).pack(side="left", padx=6)
         ttk.Button(top, text="Close", command=top.destroy).pack(pady=(0, 12))
-        top.update()  # paint immediately
+        top.update()  # Paint immediately so user sees popup right away.
+
 
 # ---------------- main ----------------
 if __name__ == "__main__":
+    # Entry point when running: python run_app.py
     app = PillBoxApp()
     app.mainloop()
